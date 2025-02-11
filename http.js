@@ -4,83 +4,26 @@ import { SocksProxyAgent } from 'socks-proxy-agent';
 
 // 创建统一的请求配置
 class RequestManager {
-  constructor(proxy = null) {
+  constructor(proxy = null, userAgent = null) {
     this.proxy = proxy;
+    this.maxRetries = 3; 
     console.log('🌐 :', proxy ? `使用代理` : '不使用代理')
-    this.baseHeaders = this.generateBaseHeaders();
+    if (userAgent) {
+      const chromeVersion = userAgent.match(/Chrome\/(\d+)/)[1];
+      this.baseHeaders = {
+        'Accept': 'application/json, text/plain, */*',
+        'Content-Type': 'application/json',
+        'Sec-Ch-Ua': `"Google Chrome";v="${chromeVersion}", "Not=A?Brand";v="8", "Chromium";v="${chromeVersion}"`,
+        'Sec-Ch-Ua-Mobile': '?0',
+        'User-Agent': userAgent,
+        'Accept-Language': getRandomAcceptLanguage()
+      };
+    } else {
+      // 如果没传入，使用随机生成的 headers
+      this.baseHeaders = generateRandomHeaders();
+    }
     this.axiosInstance = this.createAxiosInstance();
   }
-
-  generateBaseHeaders() {
-    const chromeVersion = this.getRandomChromeVersion();
-    const userAgent = this.getRandomUserAgent(chromeVersion);
-    const acceptLanguage = this.getRandomAcceptLanguage();
-
-    
-    const headers = {
-      'Accept': 'application/json, text/plain, */*',
-      'Content-Type': 'application/json',
-      'Sec-Ch-Ua': `"Google Chrome";v="${chromeVersion}", "Not=A?Brand";v="8", "Chromium";v="${chromeVersion}"`,
-      'Sec-Ch-Ua-Mobile': '?0',
-      'User-Agent': userAgent,
-      'Accept-Language': acceptLanguage
-    };
-
-    if (Math.random() > 0.5) {
-      headers['Sec-Fetch-Site'] = ['same-origin', 'same-site', 'cross-site'][Math.floor(Math.random() * 3)];
-      headers['Sec-Fetch-Mode'] = ['cors', 'navigate', 'no-cors'][Math.floor(Math.random() * 3)];
-      headers['Sec-Fetch-Dest'] = ['empty', 'document', 'script'][Math.floor(Math.random() * 3)];
-    }
-
-    if (Math.random() > 0.7) {
-      headers['Sec-Ch-Ua-Platform'] = ['"Windows"', '"macOS"'][Math.floor(Math.random() * 2)];
-    }
-
-    return headers;
-  }
-
-  getRandomChromeVersion() {
-    return Math.floor(Math.random() * (129 - 122 + 1) + 122).toString();
-  }
-
-  getRandomUserAgent(chromeVersion) {
-    const systems = [
-        // Windows 11 和 10 的配置
-        'Windows NT 10.0; Win64; x64',
-        'Windows NT 11.0; Win64; x64',
-        // Apple Silicon Mac
-        'Macintosh; Apple M1 Mac OS X 14_0',
-        'Macintosh; Apple M1 Mac OS X 14_1',
-        'Macintosh; Apple M2 Mac OS X 14_2',
-        'Macintosh; Apple M2 Mac OS X 14_3',
-        'Macintosh; Apple M3 Mac OS X 14_4'
-    ];
-    const system = this.getRandomValue(systems);
-    
-    // 针对不同系统生成稍微不同的User-Agent
-    if (system.includes('Windows')) {
-        return `Mozilla/5.0 (${system}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion}.0.0.0 Safari/537.36`;
-    } else {
-        // macOS的Chrome版本号格式略有不同，可能包含子版本号
-        const subVersion = Math.floor(Math.random() * 100);
-        return `Mozilla/5.0 (${system}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion}.0.${subVersion}.0 Safari/537.36`;
-    }
-  }
-  getRandomValue(array) {
-    return array[Math.floor(Math.random() * array.length)];
-  }
-
-  getRandomAcceptLanguage() {
-    const languages = [
-      'en-US,en;q=0.9',
-      'en-GB,en;q=0.8',
-      'zh-CN,zh;q=0.9,en;q=0.8',
-      'fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7',
-      'zh-CN,zh;q=0.9,en;q=0.8,en-GB;q=0.7,en-US;q=0.6'
-    ];
-    return languages[Math.floor(Math.random() * languages.length)];
-  }
-
   createAxiosInstance() {
     let agent = null;
     
@@ -105,12 +48,19 @@ class RequestManager {
   }
 
   async request(config) {
-    let retries = 3;
+    let retries = this.maxRetries;
     let lastError;
 
     while (retries > 0) {
         try {
-            const response = await this.axiosInstance(config);
+            const mergedConfig = {
+              ...config,
+              headers: {
+                  ...this.baseHeaders,
+                  ...config.headers
+              }
+            };
+            const response = await this.axiosInstance(mergedConfig);
             return response.data;
         } catch (error) {
             lastError = error;
@@ -123,26 +73,28 @@ class RequestManager {
                 continue;
             }
 
-            if (error.response) {
-                return error.response.data;
-            }
-            throw error;
+            throw error;  
         }
     }
-
-    throw lastError;
+  }
+  setMaxRetries(retries) {
+    this.maxRetries = retries;
   }
 }
 function createProxyAxios(proxy = null) {
-  let agent = null;
-  
+  let httpsAgent = null;
+  let httpAgent = null;
+
   if (proxy) {
       try {
           console.log(`🌐 配置代理`);
           if (proxy.startsWith('socks')) {
-              agent = new SocksProxyAgent(proxy);
+              const agent = new SocksProxyAgent(proxy);
+              httpsAgent = agent;
+              httpAgent = agent;
           } else {
-              agent = new HttpsProxyAgent(proxy);
+              httpsAgent = new HttpsProxyAgent(proxy);
+              httpAgent = new HttpsProxyAgent(proxy);
           }
       } catch (error) {
           console.error('❌ 代理配置失败:', error);
@@ -152,22 +104,25 @@ function createProxyAxios(proxy = null) {
   
   // 创建全局 axios 实例
   const axiosInstance = axios.create({
-      agent: agent,
-      timeout: 30000
+      timeout: 30000,
+      httpAgent: httpAgent,      // HTTP 代理
+      httpsAgent: httpsAgent,    // HTTPS 代理
+      proxy: false,              // 禁用默认代理配置
+      maxRedirects: 5      // 最大重定向次数
   });
 
   return axiosInstance;
 }
 
 function getRandomChromeVersion() {
-  return Math.floor(Math.random() * (129 - 122 + 1) + 122).toString();
+  return Math.floor(Math.random() * (131 - 128 + 1) + 128).toString();
 }
 
 function getRandomValue(array) {
   return array[Math.floor(Math.random() * array.length)];
 }
 
-function getRandomUserAgent(chromeVersion) {
+function getRandomUserAgent() {
   const systems = [
       'Windows NT 10.0; Win64; x64',
       'Windows NT 11.0; Win64; x64',
@@ -178,6 +133,7 @@ function getRandomUserAgent(chromeVersion) {
       'Macintosh; Apple M3 Mac OS X 14_4'
   ];
   const system = getRandomValue(systems);
+  const chromeVersion = getRandomChromeVersion();
   
   if (system.includes('Windows')) {
       return `Mozilla/5.0 (${system}) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/${chromeVersion}.0.0.0 Safari/537.36`;
@@ -213,9 +169,9 @@ function generateRandomHeaders() {
   };
 
   if (Math.random() > 0.5) {
-    headers['Sec-Fetch-Site'] = getRandomValue(['same-origin', 'same-site', 'cross-site']);
-    headers['Sec-Fetch-Mode'] = getRandomValue(['cors', 'navigate', 'no-cors']);
-    headers['Sec-Fetch-Dest'] = getRandomValue(['empty', 'document', 'script']);
+    headers['Sec-Fetch-Site'] = 'cross-site';
+    headers['Sec-Fetch-Mode'] = 'cors';
+    headers['Sec-Fetch-Dest'] = 'empty';
   }
 
   if (Math.random() > 0.7) {
